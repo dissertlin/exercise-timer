@@ -87,10 +87,21 @@ function updateSum(){
   $('sum').textContent=`總時間 ${Math.floor(tot/60)}分${tot%60}秒`;
   try{localStorage.setItem('et',JSON.stringify(c))}catch{}
 }
+function unlockAudio(){
+  try{
+    if(navigator.audioSession)navigator.audioSession.type='playback'; // iOS: play even in silent mode
+    ac=ac||new AudioContext();
+    if(ac.state!=='running')ac.resume();
+    const b=ac.createBuffer(1,1,22050),s=ac.createBufferSource();
+    s.buffer=b;s.connect(ac.destination);s.start(0);
+  }catch{}
+}
 function beep(f=880,ms=150){
-  try{ac=ac||new AudioContext();const o=ac.createOscillator(),g=ac.createGain();
+  try{ac=ac||new AudioContext();if(ac.state!=='running')ac.resume();
+  const o=ac.createOscillator(),g=ac.createGain();
   o.type='square';o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=.6;o.start();o.stop(ac.currentTime+ms/1000)}catch{}
 }
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ac&&ac.state!=='running')ac.resume()});
 function show(){
   const s=plan[idx];
   const disp=$('display');
@@ -114,6 +125,7 @@ function tick(){
     show()}
 }
 async function start(){
+  unlockAudio();
   if(running){stop();$('start').textContent='繼續';return}
   if(!plan.length||idx>=plan.length){plan=buildPlan(cfg());if(!plan.length)return;go(0)}
   running=true;$('start').textContent='暫停';
