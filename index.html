@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Timer">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#26a269">
+<title>Exercise Timer</title>
+<style>
+:root{--bg:#fafafa;--fg:#241f31;--card:#fff;--line:#d0d0d0;--warm:#e5a50a;--train:#26a269;--rest:#1c71d8;--between:#9141ac;--done:#5e5c64}
+@media (prefers-color-scheme:dark){:root{--bg:#1e1e1e;--fg:#f6f5f4;--card:#2a2a2a;--line:#444}}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+main{width:100%;max-width:420px}
+h1{font-size:1.2rem;text-align:center;margin:0 0 12px}
+#display{border-radius:20px;padding:24px 16px;text-align:center;color:#fff;background:var(--done);transition:background .3s}
+#phase{font-size:1.5rem;font-weight:600}
+#time{font-size:6rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+#info{opacity:.9}
+#bar{height:8px;background:rgba(255,255,255,.3);border-radius:4px;margin-top:12px;overflow:hidden}
+#bar i{display:block;height:100%;width:0;background:#fff}
+.btns{display:flex;gap:8px;margin:14px 0}
+button{flex:1;padding:14px;border:0;border-radius:12px;font-size:1rem;background:var(--card);color:var(--fg);border:1px solid var(--line);cursor:pointer}
+button.primary{background:var(--train);color:#fff;border:0}
+fieldset{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:8px 14px}
+legend{padding:0 6px}
+label{display:flex;justify-content:space-between;align-items:center;padding:8px 0}
+input[type=number]{width:90px;padding:8px;font-size:1rem;text-align:right;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+.sum{text-align:center;opacity:.7;font-size:.9rem;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>🏋️ Exercise Timer</h1>
+<div id="display">
+  <div id="phase">準備好了</div>
+  <div id="time">0</div>
+  <div id="info"></div>
+  <div id="bar"><i></i></div>
+</div>
+<div class="btns">
+  <button id="start" class="primary">開始</button>
+  <button id="skip">跳過</button>
+  <button id="reset">重設</button>
+</div>
+<fieldset id="settings">
+  <legend>設定(秒)</legend>
+  <label>熱身 Warm up <input type="number" min="0" id="warm" value="10"></label>
+  <label>訓練 Training <input type="number" min="1" id="train" value="40"></label>
+  <label>休息 Rest <input type="number" min="0" id="rest" value="5"></label>
+  <label>每輪動作數 Exercises / cycle <input type="number" min="1" id="per" value="1"></label>
+  <label>循環次數 Cycles <input type="number" min="1" id="cycles" value="4"></label>
+  <label>循環間休息 Between cycles <input type="number" min="0" id="between" value="30"></label>
+</fieldset>
+<div class="sum" id="sum"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const keys=['warm','train','rest','per','cycles','between'];
+const COLORS={warm:'--warm',train:'--train',rest:'--rest',between:'--between',done:'--done'};
+const LABELS={warm:'熱身',train:'訓練',rest:'休息',between:'循環間休息',done:'完成 🎉'};
+try{const s=JSON.parse(localStorage.getItem('et')||'{}');keys.forEach(k=>{if(s[k]!=null)$(k).value=s[k]})}catch{}
+const cfg=()=>Object.fromEntries(keys.map(k=>[k,Math.max(0,parseInt($(k).value)||0)]));
+
+function buildPlan(c){
+  const p=[];
+  if(c.warm)p.push({t:'warm',d:c.warm});
+  for(let i=1;i<=c.cycles;i++){
+    for(let j=1;j<=c.per;j++){
+      p.push({t:'train',d:c.train,i,j});
+      const final=i===c.cycles&&j===c.per;
+      if(!final&&c.rest)p.push({t:'rest',d:c.rest,i,j});
+    }
+    if(i<c.cycles&&c.between)p.push({t:'between',d:c.between,i});
+  }
+  return p;
+}
+let plan=[],idx=0,left=0,timer=null,running=false,wake=null,ac=null;
+
+function updateSum(){
+  const c=cfg();const tot=buildPlan(c).reduce((a,s)=>a+s.d,0);
+  $('sum').textContent=`總時間 ${Math.floor(tot/60)}分${tot%60}秒`;
+  try{localStorage.setItem('et',JSON.stringify(c))}catch{}
+}
+function beep(f=880,ms=150){
+  try{ac=ac||new AudioContext();const o=ac.createOscillator(),g=ac.createGain();
+  o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=.2;o.start();o.stop(ac.currentTime+ms/1000)}catch{}
+}
+function show(){
+  const s=plan[idx];
+  const disp=$('display');
+  if(!s){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';$('bar i')&&0;disp.querySelector('#bar i').style.width='100%';return}
+  disp.style.background=`var(${COLORS[s.t]})`;
+  $('phase').textContent=LABELS[s.t];
+  $('time').textContent=left;
+  $('info').textContent=s.i?`循環 ${s.i}/${cfg().cycles}`+(cfg().per>1&&s.j?` · 動作 ${s.j}/${cfg().per}`:''):'';
+  disp.querySelector('#bar i').style.width=(100*(s.d-left)/s.d)+'%';
+}
+function go(n){
+  idx=n;
+  if(idx>=plan.length){stop();show();beep(1200,600);return}
+  left=plan[idx].d;show();beep(plan[idx].t==='train'?1000:600,250);
+}
+function tick(){
+  left--;
+  if(left<=0)go(idx+1);
+  else{if(left<=3)beep(700,80);show()}
+}
+async function start(){
+  if(running){stop();$('start').textContent='繼續';return}
+  if(!plan.length||idx>=plan.length){plan=buildPlan(cfg());if(!plan.length)return;go(0)}
+  running=true;$('start').textContent='暫停';
+  keys.forEach(k=>$(k).disabled=true);
+  timer=setInterval(tick,1000);
+  try{wake=await navigator.wakeLock?.request('screen')}catch{}
+}
+function stop(){running=false;clearInterval(timer);keys.forEach(k=>$(k).disabled=false);try{wake?.release()}catch{};if(idx>=plan.length)$('start').textContent='開始'}
+function reset(){stop();plan=[];idx=0;left=0;$('start').textContent='開始';$('display').style.background=`var(${COLORS.done})`;
+  $('phase').textContent='準備好了';$('time').textContent='0';$('info').textContent='';$('display').querySelector('#bar i').style.width='0';updateSum()}
+$('start').onclick=start;
+$('skip').onclick=()=>{if(plan.length&&idx<plan.length)go(idx+1)};
+$('reset').onclick=reset;
+keys.forEach(k=>$(k).addEventListener('input',updateSum));
+updateSum();
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
