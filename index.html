@@ -89,7 +89,7 @@ function updateSum(){
 }
 function beep(f=880,ms=150){
   try{ac=ac||new AudioContext();const o=ac.createOscillator(),g=ac.createGain();
-  o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=.2;o.start();o.stop(ac.currentTime+ms/1000)}catch{}
+  o.type='square';o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=.6;o.start();o.stop(ac.currentTime+ms/1000)}catch{}
 }
 function show(){
   const s=plan[idx];
@@ -104,12 +104,14 @@ function show(){
 function go(n){
   idx=n;
   if(idx>=plan.length){stop();show();beep(1200,600);return}
-  left=plan[idx].d;show();beep(plan[idx].t==='train'?1000:600,250);
+  left=plan[idx].d;show();beep(plan[idx].t==='train'?1600:600,300);
 }
 function tick(){
   left--;
   if(left<=0)go(idx+1);
-  else{if(left<=(['train','rest'].includes(plan[idx].t)?5:3))beep(left===1?1000:700,left===1?200:100);show()}
+  else{const t=plan[idx].t,tr=t==='train';
+    if(left<=(tr||t==='rest'?5:3))beep(tr?(left===1?2200:1500):(left===1?1000:700),left===1?250:120);
+    show()}
 }
 async function start(){
   if(running){stop();$('start').textContent='繼續';return}
