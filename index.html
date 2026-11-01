@@ -93,6 +93,17 @@ function buildPlan(c){
    <audio> element, so beeps keep coming with the screen off (JS timers are frozen
    then, but media playback is not). The wall clock is the source of truth; the
    audio is re-synced to it whenever it drifts or was interrupted by another app. */
+function beepList(p,tot){
+  const L=[];
+  p.forEach(x=>{
+    const tr=x.t==='train',th=(tr||x.t==='rest')?5:3;
+    L.push({at:x.s,f:tr?1600:600,ms:300});
+    for(let left=Math.min(th,x.d-1);left>=1;left--)
+      L.push({at:x.s+x.d-left,f:tr?(left===1?2200:1500):(left===1?1000:700),ms:left===1?250:120});
+  });
+  L.push({at:tot,f:1200,ms:600});
+  return L;
+}
 const SR=8000;
 function renderAudio(p,tot){
   const n=Math.ceil((tot+1.5)*SR),pcm=new Int16Array(n);
@@ -104,13 +115,7 @@ function renderAudio(p,tot){
       pcm[a+k]=v*env*30000;
     }
   };
-  p.forEach(x=>{
-    const tr=x.t==='train',th=(tr||x.t==='rest')?5:3;
-    tone(x.s,tr?1600:600,300);
-    for(let left=Math.min(th,x.d-1);left>=1;left--)
-      tone(x.s+x.d-left,tr?(left===1?2200:1500):(left===1?1000:700),left===1?250:120);
-  });
-  tone(tot,1200,600);
+  beepList(p,tot).forEach(b=>tone(b.at,b.f,b.ms));
   const buf=new ArrayBuffer(44+n*2),v=new DataView(buf);
   const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
   w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');
@@ -126,7 +131,50 @@ function playAt(e){
   try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.3)audio.currentTime=e}catch{}
   const p=audio.play();if(p&&p.catch)p.catch(()=>{});
 }
-audio.addEventListener('loadedmetadata',()=>{if(running)try{audio.currentTime=elapsed()}catch{}});
+audio.addEventListener('loadedmetadata',()=>{if(running&&engine==='media')try{audio.currentTime=elapsed()}catch{}});
+
+/* Mix mode: Web Audio oscillators scheduled ahead on the AudioContext clock.
+   iOS treats Web Audio as ambient sound, so it mixes with Spotify etc.
+   (works in Chrome too, where navigator.audioSession is missing). */
+let ac=null,nodes=[],anchor=null,beeps=[],engine='media';
+function waStop(){nodes.forEach(o=>{try{o.stop()}catch{}});nodes=[]}
+function waSchedule(e){
+  waStop();
+  const t=ac.currentTime+.05;anchor={c:t,e};
+  for(const b of beeps){
+    const end=b.at+b.ms/1000;if(end-e<.03)continue;
+    const st=t+Math.max(0,b.at-e),du=end-Math.max(b.at,e);
+    const o=ac.createOscillator(),g=ac.createGain();
+    o.type='square';o.frequency.value=b.f;
+    g.gain.setValueAtTime(0,st);g.gain.linearRampToValueAtTime(.5,st+.005);
+    g.gain.setValueAtTime(.5,st+du-.01);g.gain.linearRampToValueAtTime(0,st+du);
+    o.connect(g);g.connect(ac.destination);o.start(st);o.stop(st+du+.02);nodes.push(o);
+  }
+}
+function soundPlay(e){
+  if(engine==='wa'){
+    try{
+      ac=ac||new (window.AudioContext||window.webkitAudioContext)();
+      if(ac.state!=='running')ac.resume().then(()=>{if(running)waSchedule(elapsed())}).catch(()=>{});
+      waSchedule(e);
+    }catch{}
+  }else{
+    if(!url){url=URL.createObjectURL(renderAudio(plan,total));audio.src=url}
+    playAt(e);
+  }
+}
+function soundStop(){audio.pause();waStop()}
+function soundSync(e){
+  if(engine==='wa'){
+    if(!ac)return;
+    if(ac.state!=='running'){if(!document.hidden&&Date.now()-lastTry>1500){lastTry=Date.now();ac.resume().then(()=>{if(running)waSchedule(elapsed())}).catch(()=>{})}}
+    else if(anchor&&Math.abs((ac.currentTime-anchor.c)-(e-anchor.e))>.3)waSchedule(e);
+    return;
+  }
+  if(!audio.paused){
+    try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.5)audio.currentTime=e}catch{}
+  }else if(!document.hidden&&Date.now()-lastTry>1500){lastTry=Date.now();playAt(e)} // interrupted by another app → resume
+}
 
 /* ---- State ---- */
 let plan=[],total=0,base=0,t0=0,running=false,timer=null,wake=null,lastIdx=-1;
@@ -161,9 +209,7 @@ function loop(){
   if(!running)return;
   const e=elapsed();
   if(e>=total){finish();return}
-  if(!audio.paused){
-    try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.5)audio.currentTime=e}catch{}
-  }else if(!document.hidden&&Date.now()-lastTry>1500){lastTry=Date.now();playAt(e)} // interrupted by another app → resume
+  soundSync(e);
   show();
 }
 async function keepAwake(){try{if(running&&!wake)wake=await navigator.wakeLock?.request('screen');wake?.addEventListener?.('release',()=>{wake=null})}catch{}}
@@ -177,17 +223,19 @@ function start(){
     plan=buildPlan(cfg());if(!plan.length)return;
     total=plan.reduce((a,s)=>a+s.d,0);base=0;lastIdx=-1;
     if(url)URL.revokeObjectURL(url);
-    url=URL.createObjectURL(renderAudio(plan,total));audio.src=url;
+    url=null;beeps=beepList(plan,total);
   }
+  const want=$('mix').checked?'wa':'media';
+  if(want!==engine){soundStop();engine=want}
   running=true;t0=now();
-  playAt(base); // must run inside the tap so iOS allows playback
+  soundPlay(base); // must run inside the tap so iOS allows playback
   $('start').textContent='暫停';lockInputs(true);
   clearInterval(timer);timer=setInterval(loop,250);
   keepAwake();show();
 }
 function pause(){
   base=elapsed();running=false;
-  clearInterval(timer);audio.pause();lockInputs(false);freeAwake();
+  clearInterval(timer);soundStop();lockInputs(false);freeAwake();
   $('start').textContent='繼續';show();
 }
 function finish(){
@@ -199,11 +247,11 @@ function skip(){
   const i=segAt(elapsed());if(i>=plan.length)return;
   const e=plan[i].s+plan[i].d;
   base=e;t0=now();
-  if(running){if(e>=total){try{audio.currentTime=e}catch{};finish();return}playAt(e)}
+  if(running){soundPlay(Math.min(e,total));if(e>=total){finish();return}}
   show();
 }
 function reset(){
-  running=false;clearInterval(timer);audio.pause();lockInputs(false);freeAwake();
+  running=false;clearInterval(timer);soundStop();lockInputs(false);freeAwake();
   plan=[];total=0;base=0;lastIdx=-1;$('start').textContent='開始';updateSum();show();
 }
 $('start').onclick=start;
