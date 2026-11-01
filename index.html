@@ -30,6 +30,8 @@ button.primary{background:var(--train);color:#fff;border:0}
 fieldset{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:8px 14px}
 legend{padding:0 6px}
 label{display:flex;justify-content:space-between;align-items:center;padding:8px 0}
+input[type=checkbox]{width:22px;height:22px;accent-color:var(--train)}
+.hint{font-size:.8rem;opacity:.65;padding:0 0 6px}
 input[type=number]{width:90px;padding:8px;font-size:1rem;text-align:right;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
 .sum{text-align:center;opacity:.7;font-size:.9rem;margin-top:8px}
 </style>
@@ -56,12 +58,17 @@ input[type=number]{width:90px;padding:8px;font-size:1rem;text-align:right;border
   <label>每輪動作數 Exercises / cycle <input type="number" min="1" id="per" value="4"></label>
   <label>循環次數 Cycles <input type="number" min="1" id="cycles" value="4"></label>
   <label>循環間休息 Between cycles <input type="number" min="0" id="between" value="30"></label>
+  <label>與背景音樂混音 Mix with music <input type="checkbox" id="mix" checked></label>
+  <div class="hint">開：Spotify 等音樂不會被暫停，但靜音鍵開著會沒聲音。關：靜音也會響，但會暫停其他音樂。</div>
 </fieldset>
 <div class="sum" id="sum"></div>
 </main>
 <script>
 const $=id=>document.getElementById(id);
 const keys=['warm','train','rest','per','cycles','between'];
+try{const m=localStorage.getItem('et-mix');if(m!=null)$('mix').checked=m==='1'}catch{}
+function applySession(){try{if(navigator.audioSession)navigator.audioSession.type=$('mix').checked?'ambient':'playback'}catch{}}
+$('mix').addEventListener('change',()=>{try{localStorage.setItem('et-mix',$('mix').checked?'1':'0')}catch{};applySession()});
 const COLORS={warm:'--warm',train:'--train',rest:'--rest',between:'--between',done:'--done'};
 const LABELS={warm:'熱身',train:'訓練',rest:'休息',between:'循環間休息',done:'完成 🎉'};
 try{const s=JSON.parse(localStorage.getItem('et')||'{}');keys.forEach(k=>{if(s[k]!=null)$(k).value=s[k]})}catch{}
@@ -165,7 +172,7 @@ function lockInputs(on){keys.forEach(k=>$(k).disabled=on)}
 
 function start(){
   if(running){pause();return}
-  try{if(navigator.audioSession)navigator.audioSession.type='playback'}catch{}
+  applySession();
   if(!plan.length||base>=total){
     plan=buildPlan(cfg());if(!plan.length)return;
     total=plan.reduce((a,s)=>a+s.d,0);base=0;lastIdx=-1;
