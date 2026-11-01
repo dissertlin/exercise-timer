@@ -78,68 +78,139 @@ function buildPlan(c){
     }
     if(i<c.cycles&&c.between)p.push({t:'between',d:c.between,i});
   }
+  let t=0;p.forEach(x=>{x.s=t;t+=x.d});
   return p;
 }
-let plan=[],idx=0,left=0,timer=null,running=false,wake=null,ac=null;
+
+/* ---- Sound: the whole workout is rendered into one audio file and played by an
+   <audio> element, so beeps keep coming with the screen off (JS timers are frozen
+   then, but media playback is not). The wall clock is the source of truth; the
+   audio is re-synced to it whenever it drifts or was interrupted by another app. */
+const SR=8000;
+function renderAudio(p,tot){
+  const n=Math.ceil((tot+1.5)*SR),pcm=new Int16Array(n);
+  const tone=(at,f,ms)=>{
+    const a=Math.round(at*SR),len=Math.round(ms/1000*SR),h=3*f<SR/2,w=2*Math.PI*f/SR;
+    for(let k=0;k<len&&a+k<n;k++){
+      const env=Math.min(1,k/40,(len-k)/40);
+      let v=Math.sin(w*k);if(h)v=(v+.35*Math.sin(3*w*k))/1.2;
+      pcm[a+k]=v*env*30000;
+    }
+  };
+  p.forEach(x=>{
+    const tr=x.t==='train',th=(tr||x.t==='rest')?5:3;
+    tone(x.s,tr?1600:600,300);
+    for(let left=Math.min(th,x.d-1);left>=1;left--)
+      tone(x.s+x.d-left,tr?(left===1?2200:1500):(left===1?1000:700),left===1?250:120);
+  });
+  tone(tot,1200,600);
+  const buf=new ArrayBuffer(44+n*2),v=new DataView(buf);
+  const w=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  w(0,'RIFF');v.setUint32(4,36+n*2,true);w(8,'WAVE');w(12,'fmt ');
+  v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,SR,true);v.setUint32(28,SR*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+  w(36,'data');v.setUint32(40,n*2,true);
+  for(let i=0;i<n;i++)v.setInt16(44+i*2,pcm[i],true);
+  return new Blob([buf],{type:'audio/wav'});
+}
+const audio=new Audio();audio.preload='auto';audio.setAttribute('playsinline','');
+let url=null,lastTry=0;
+function playAt(e){
+  try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.3)audio.currentTime=e}catch{}
+  const p=audio.play();if(p&&p.catch)p.catch(()=>{});
+}
+audio.addEventListener('loadedmetadata',()=>{if(running)try{audio.currentTime=elapsed()}catch{}});
+
+/* ---- State ---- */
+let plan=[],total=0,base=0,t0=0,running=false,timer=null,wake=null,lastIdx=-1;
+const now=()=>Date.now()/1000;
+const elapsed=()=>running?base+now()-t0:base;
+const segAt=e=>{for(let i=0;i<plan.length;i++)if(e<plan[i].s+plan[i].d)return i;return plan.length};
 
 function updateSum(){
   const c=cfg();const tot=buildPlan(c).reduce((a,s)=>a+s.d,0);
   $('sum').textContent=`總時間 ${Math.floor(tot/60)}分${tot%60}秒`;
   try{localStorage.setItem('et',JSON.stringify(c))}catch{}
 }
-function unlockAudio(){
-  try{
-    if(navigator.audioSession)navigator.audioSession.type='playback'; // iOS: play even in silent mode
-    ac=ac||new AudioContext();
-    if(ac.state!=='running')ac.resume();
-    const b=ac.createBuffer(1,1,22050),s=ac.createBufferSource();
-    s.buffer=b;s.connect(ac.destination);s.start(0);
-  }catch{}
+function setMeta(title){
+  try{if('mediaSession' in navigator)navigator.mediaSession.metadata=new MediaMetadata({title,artist:'Exercise Timer'})}catch{}
 }
-function beep(f=880,ms=150){
-  try{ac=ac||new AudioContext();if(ac.state!=='running')ac.resume();
-  const o=ac.createOscillator(),g=ac.createGain();
-  o.type='square';o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=.6;o.start();o.stop(ac.currentTime+ms/1000)}catch{}
-}
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&ac&&ac.state!=='running')ac.resume()});
 function show(){
-  const s=plan[idx];
-  const disp=$('display');
-  if(!s){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';$('bar i')&&0;disp.querySelector('#bar i').style.width='100%';return}
+  const disp=$('display'),bar=disp.querySelector('#bar i');
+  if(!plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent='準備好了';$('time').textContent='0';$('info').textContent='';bar.style.width='0';return}
+  const e=elapsed(),i=segAt(e);
+  if(i>=plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';bar.style.width='100%';
+    if(lastIdx!==i){lastIdx=i;setMeta(LABELS.done)}return}
+  const s=plan[i],c=cfg(),left=Math.max(1,Math.ceil(s.s+s.d-e-1e-6));
   disp.style.background=`var(${COLORS[s.t]})`;
   $('phase').textContent=LABELS[s.t];
   $('time').textContent=left;
-  $('info').textContent=s.i?`循環 ${s.i}/${cfg().cycles}`+(cfg().per>1&&s.j?` · 動作 ${s.j}/${cfg().per}`:''):'';
-  disp.querySelector('#bar i').style.width=(100*(s.d-left)/s.d)+'%';
+  const info=s.i?`循環 ${s.i}/${c.cycles}`+(c.per>1&&s.j?` · 動作 ${s.j}/${c.per}`:''):'';
+  $('info').textContent=info;
+  bar.style.width=(100*(s.d-left)/s.d)+'%';
+  if(lastIdx!==i){lastIdx=i;setMeta(LABELS[s.t]+(info?' · '+info:''))}
 }
-function go(n){
-  idx=n;
-  if(idx>=plan.length){stop();show();beep(1200,600);return}
-  left=plan[idx].d;show();beep(plan[idx].t==='train'?1600:600,300);
+function loop(){
+  if(!running)return;
+  const e=elapsed();
+  if(e>=total){finish();return}
+  if(!audio.paused){
+    try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.5)audio.currentTime=e}catch{}
+  }else if(!document.hidden&&Date.now()-lastTry>1500){lastTry=Date.now();playAt(e)} // interrupted by another app → resume
+  show();
 }
-function tick(){
-  left--;
-  if(left<=0)go(idx+1);
-  else{const t=plan[idx].t,tr=t==='train';
-    if(left<=(tr||t==='rest'?5:3))beep(tr?(left===1?2200:1500):(left===1?1000:700),left===1?250:120);
-    show()}
+async function keepAwake(){try{if(running&&!wake)wake=await navigator.wakeLock?.request('screen');wake?.addEventListener?.('release',()=>{wake=null})}catch{}}
+function freeAwake(){try{wake?.release()}catch{};wake=null}
+function lockInputs(on){keys.forEach(k=>$(k).disabled=on)}
+
+function start(){
+  if(running){pause();return}
+  try{if(navigator.audioSession)navigator.audioSession.type='playback'}catch{}
+  if(!plan.length||base>=total){
+    plan=buildPlan(cfg());if(!plan.length)return;
+    total=plan.reduce((a,s)=>a+s.d,0);base=0;lastIdx=-1;
+    if(url)URL.revokeObjectURL(url);
+    url=URL.createObjectURL(renderAudio(plan,total));audio.src=url;
+  }
+  running=true;t0=now();
+  playAt(base); // must run inside the tap so iOS allows playback
+  $('start').textContent='暫停';lockInputs(true);
+  clearInterval(timer);timer=setInterval(loop,250);
+  keepAwake();show();
 }
-async function start(){
-  unlockAudio();
-  if(running){stop();$('start').textContent='繼續';return}
-  if(!plan.length||idx>=plan.length){plan=buildPlan(cfg());if(!plan.length)return;go(0)}
-  running=true;$('start').textContent='暫停';
-  keys.forEach(k=>$(k).disabled=true);
-  timer=setInterval(tick,1000);
-  try{wake=await navigator.wakeLock?.request('screen')}catch{}
+function pause(){
+  base=elapsed();running=false;
+  clearInterval(timer);audio.pause();lockInputs(false);freeAwake();
+  $('start').textContent='繼續';show();
 }
-function stop(){running=false;clearInterval(timer);keys.forEach(k=>$(k).disabled=false);try{wake?.release()}catch{};if(idx>=plan.length)$('start').textContent='開始'}
-function reset(){stop();plan=[];idx=0;left=0;$('start').textContent='開始';$('display').style.background=`var(${COLORS.done})`;
-  $('phase').textContent='準備好了';$('time').textContent='0';$('info').textContent='';$('display').querySelector('#bar i').style.width='0';updateSum()}
+function finish(){
+  base=total;running=false;clearInterval(timer);lockInputs(false);freeAwake();
+  $('start').textContent='開始';show(); // audio plays out the final beep on its own
+}
+function skip(){
+  if(!plan.length)return;
+  const i=segAt(elapsed());if(i>=plan.length)return;
+  const e=plan[i].s+plan[i].d;
+  base=e;t0=now();
+  if(running){if(e>=total){try{audio.currentTime=e}catch{};finish();return}playAt(e)}
+  show();
+}
+function reset(){
+  running=false;clearInterval(timer);audio.pause();lockInputs(false);freeAwake();
+  plan=[];total=0;base=0;lastIdx=-1;$('start').textContent='開始';updateSum();show();
+}
 $('start').onclick=start;
-$('skip').onclick=()=>{if(plan.length&&idx<plan.length)go(idx+1)};
+$('skip').onclick=skip;
 $('reset').onclick=reset;
 keys.forEach(k=>$(k).addEventListener('input',updateSum));
+const back=()=>{if(!document.hidden&&running){keepAwake();loop()}};
+document.addEventListener('visibilitychange',back);
+window.addEventListener('pageshow',back);
+window.addEventListener('focus',back);
+try{
+  navigator.mediaSession.setActionHandler('play',()=>{if(!running)start()});
+  navigator.mediaSession.setActionHandler('pause',()=>{if(running)pause()});
+}catch{}
 updateSum();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
