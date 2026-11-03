@@ -72,7 +72,8 @@ $('mix').addEventListener('change',()=>{try{localStorage.setItem('et-mix',$('mix
 const COLORS={warm:'--warm',train:'--train',rest:'--rest',between:'--between',done:'--done'};
 const LABELS={warm:'熱身',train:'訓練',rest:'休息',between:'循環間休息',done:'完成 🎉'};
 try{const s=JSON.parse(localStorage.getItem('et')||'{}');keys.forEach(k=>{if(s[k]!=null)$(k).value=s[k]})}catch{}
-const cfg=()=>Object.fromEntries(keys.map(k=>[k,Math.max(0,parseInt($(k).value)||0)]));
+const LIM={warm:[0,3600],train:[1,3600],rest:[0,3600],per:[1,99],cycles:[1,99],between:[0,3600]},MAX_TOTAL=3*3600;
+const cfg=()=>Object.fromEntries(keys.map(k=>{const[lo,hi]=LIM[k],n=parseInt($(k).value);return[k,Math.min(hi,Math.max(lo,Number.isFinite(n)?n:lo))]}));
 
 function buildPlan(c){
   const p=[];
@@ -177,14 +178,14 @@ function soundSync(e){
 }
 
 /* ---- State ---- */
-let plan=[],total=0,base=0,t0=0,running=false,timer=null,wake=null,lastIdx=-1;
+let plan=[],pc=null,total=0,base=0,t0=0,running=false,timer=null,wake=null,lastIdx=-1;
 const now=()=>Date.now()/1000;
 const elapsed=()=>running?base+now()-t0:base;
 const segAt=e=>{for(let i=0;i<plan.length;i++)if(e<plan[i].s+plan[i].d)return i;return plan.length};
 
 function updateSum(){
   const c=cfg();const tot=buildPlan(c).reduce((a,s)=>a+s.d,0);
-  $('sum').textContent=`總時間 ${Math.floor(tot/60)}分${tot%60}秒`;
+  $('sum').textContent=tot>MAX_TOTAL?'總時間超過上限 3 小時，請縮短設定':`總時間 ${Math.floor(tot/60)}分${tot%60}秒`;
   try{localStorage.setItem('et',JSON.stringify(c))}catch{}
 }
 function setMeta(title){
@@ -196,7 +197,7 @@ function show(){
   const e=elapsed(),i=segAt(e);
   if(i>=plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';bar.style.width='100%';
     if(lastIdx!==i){lastIdx=i;setMeta(LABELS.done)}return}
-  const s=plan[i],c=cfg(),left=Math.max(1,Math.ceil(s.s+s.d-e-1e-6));
+  const s=plan[i],c=pc,left=Math.max(1,Math.ceil(s.s+s.d-e-1e-6));
   disp.style.background=`var(${COLORS[s.t]})`;
   $('phase').textContent=LABELS[s.t];
   $('time').textContent=left;
@@ -212,16 +213,28 @@ function loop(){
   soundSync(e);
   show();
 }
-async function keepAwake(){try{if(running&&!wake)wake=await navigator.wakeLock?.request('screen');wake?.addEventListener?.('release',()=>{wake=null})}catch{}}
+let wakeBusy=false;
+async function keepAwake(){
+  if(!running||wake||wakeBusy)return;
+  wakeBusy=true;
+  try{
+    const w=await navigator.wakeLock?.request('screen');
+    if(!w)return;
+    if(!running){w.release().catch(()=>{});return} // paused/reset while the request was pending
+    wake=w;w.addEventListener('release',()=>{if(wake===w)wake=null});
+  }catch{}finally{wakeBusy=false}
+}
 function freeAwake(){try{wake?.release()}catch{};wake=null}
 function lockInputs(on){keys.forEach(k=>$(k).disabled=on)}
+const setMixLock=on=>{$('mix').disabled=on};
 
 function start(){
   if(running){pause();return}
   applySession();
   if(!plan.length||base>=total){
-    plan=buildPlan(cfg());if(!plan.length)return;
-    total=plan.reduce((a,s)=>a+s.d,0);base=0;lastIdx=-1;
+    const c=cfg(),np=buildPlan(c),nt=np.reduce((a,s)=>a+s.d,0);
+    if(!np.length||nt>MAX_TOTAL)return;
+    plan=np;pc=c;total=nt;base=0;lastIdx=-1;
     if(url)URL.revokeObjectURL(url);
     url=null;beeps=beepList(plan,total);
   }
@@ -229,17 +242,17 @@ function start(){
   if(want!==engine){soundStop();engine=want}
   running=true;t0=now();
   soundPlay(base); // must run inside the tap so iOS allows playback
-  $('start').textContent='暫停';lockInputs(true);
+  $('start').textContent='暫停';lockInputs(true);setMixLock(true);
   clearInterval(timer);timer=setInterval(loop,250);
   keepAwake();show();
 }
 function pause(){
   base=elapsed();running=false;
-  clearInterval(timer);soundStop();lockInputs(false);freeAwake();
+  clearInterval(timer);soundStop();setMixLock(false);freeAwake(); // settings stay locked until reset/finish
   $('start').textContent='繼續';show();
 }
 function finish(){
-  base=total;running=false;clearInterval(timer);lockInputs(false);freeAwake();
+  base=total;running=false;clearInterval(timer);lockInputs(false);setMixLock(false);freeAwake();
   $('start').textContent='開始';show(); // audio plays out the final beep on its own
 }
 function skip(){
@@ -247,12 +260,14 @@ function skip(){
   const i=segAt(elapsed());if(i>=plan.length)return;
   const e=plan[i].s+plan[i].d;
   base=e;t0=now();
-  if(running){soundPlay(Math.min(e,total));if(e>=total){finish();return}}
+  if(running)soundPlay(Math.min(e,total));
+  if(e>=total){finish();return}
   show();
 }
 function reset(){
-  running=false;clearInterval(timer);soundStop();lockInputs(false);freeAwake();
-  plan=[];total=0;base=0;lastIdx=-1;$('start').textContent='開始';updateSum();show();
+  running=false;clearInterval(timer);soundStop();lockInputs(false);setMixLock(false);freeAwake();
+  if(url){audio.removeAttribute('src');URL.revokeObjectURL(url);url=null}
+  plan=[];pc=null;total=0;base=0;lastIdx=-1;$('start').textContent='開始';updateSum();show();
 }
 $('start').onclick=start;
 $('skip').onclick=skip;
