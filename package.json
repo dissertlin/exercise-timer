@@ -1,0 +1,14 @@
+{
+  "name": "exercise-timer",
+  "private": true,
+  "description": "Interval timer PWA (static, no build step)",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "test:unit": "node --test tests/core.test.js",
+    "test:e2e": "node --test tests/e2e.test.js",
+    "serve": "python3 -m http.server 8000"
+  },
+  "devDependencies": {
+    "playwright": "^1.45.0"
+  }
+}
