@@ -76,6 +76,7 @@ kbd{font:inherit;border:1px solid var(--ctl);border-radius:4px;padding:0 .35em}
   <label>循環次數 Cycles <input type="number" inputmode="numeric" min="1" max="99" id="cycles" value="4"></label>
   <label>循環間休息 Between cycles <input type="number" inputmode="numeric" min="0" max="3600" id="between" value="30"></label>
   <label>與背景音樂混音 Mix with music <input type="checkbox" id="mix" checked aria-describedby="mixhint"></label>
+  <label>靜音嗶聲 Mute beeps <input type="checkbox" id="mute"></label>
   <div class="hint" id="mixhint">開：Spotify 等音樂不會被暫停，但靜音鍵開著會沒聲音。關：靜音也會響，但會暫停其他音樂。</div>
   <div class="hint" id="lockhint" hidden>計時進行中，設定已鎖定。按「重設」後可修改。</div>
 </fieldset>
@@ -87,8 +88,15 @@ kbd{font:inherit;border:1px solid var(--ctl);border-radius:4px;padding:0 .35em}
 const {KEYS:keys,MAX_TOTAL,clampConfig,buildPlan,planTotal,beepList,wavBytes,fmtTime}=ETCore;
 const $=id=>document.getElementById(id);
 try{const m=localStorage.getItem('et-mix');if(m!=null)$('mix').checked=m==='1'}catch{}
+try{if(localStorage.getItem('et-mute')==='1')$('mute').checked=true}catch{}
+const muted=()=>$('mute').checked;
 function applySession(){try{if(navigator.audioSession)navigator.audioSession.type=$('mix').checked?'ambient':'playback'}catch{}}
 $('mix').addEventListener('change',()=>{try{localStorage.setItem('et-mix',$('mix').checked?'1':'0')}catch{};applySession()});
+$('mute').addEventListener('change',()=>{
+  try{localStorage.setItem('et-mute',muted()?'1':'0')}catch{}
+  audio.muted=muted();
+  if(running&&engine==='wa'&&ac)waSchedule(elapsed()); // apply immediately: (re)schedule or clear the queued beeps
+});
 const COLORS={warm:'--warm',train:'--train',rest:'--rest',between:'--between',done:'--done'};
 const LABELS={warm:'熱身',train:'訓練',rest:'休息',between:'循環間休息',done:'完成 🎉'};
 try{const s=JSON.parse(localStorage.getItem('et')||'{}');keys.forEach(k=>{if(s[k]!=null)$(k).value=s[k]})}catch{}
@@ -100,7 +108,7 @@ const cfg=()=>clampConfig(Object.fromEntries(keys.map(k=>[k,$(k).value])));
    then, but media playback is not). The wall clock is the source of truth; the
    audio is re-synced to it whenever it drifts or was interrupted by another app. */
 const renderAudio=(p,t)=>new Blob([wavBytes(p,t)],{type:'audio/wav'});
-const audio=new Audio();audio.preload='auto';audio.setAttribute('playsinline','');
+const audio=new Audio();audio.preload='auto';audio.muted=false;audio.setAttribute('playsinline','');
 let url=null,lastTry=0;
 function playAt(e){
   try{if(audio.readyState>0&&Math.abs(audio.currentTime-e)>.3)audio.currentTime=e}catch{}
@@ -116,6 +124,7 @@ function waStop(){nodes.forEach(o=>{try{o.stop()}catch{}});nodes=[]}
 function waSchedule(e){
   waStop();
   const t=ac.currentTime+.05;anchor={c:t,e};
+  if(muted())return;
   for(const b of beeps){
     const end=b.at+b.ms/1000;if(end-e<.03)continue;
     const st=t+Math.max(0,b.at-e),du=end-Math.max(b.at,e);
@@ -135,6 +144,7 @@ function soundPlay(e){
     }catch{}
   }else{
     if(!url){url=URL.createObjectURL(renderAudio(plan,total));audio.src=url}
+    audio.muted=muted();
     playAt(e);
   }
 }
@@ -169,9 +179,9 @@ const say=t=>{$('sr').textContent=t}; // polite live region: phase changes only,
 function setBar(pct){$('bar').querySelector('i').style.width=pct+'%';$('bar').setAttribute('aria-valuenow',Math.round(pct))}
 function show(){
   const disp=$('display');
-  if(!plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent='準備好了';$('time').textContent='0';$('info').textContent='';setBar(0);return}
+  if(!plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent='準備好了';$('time').textContent='0';$('info').textContent='';$('next').textContent='';document.title='Exercise Timer';setBar(0);return}
   const e=elapsed(),i=segAt(e);
-  if(i>=plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';setBar(100);
+  if(i>=plan.length){disp.style.background=`var(${COLORS.done})`;$('phase').textContent=LABELS.done;$('time').textContent='0';$('info').textContent='';$('next').textContent='';document.title='Exercise Timer';setBar(100);
     if(lastIdx!==i){lastIdx=i;setMeta(LABELS.done);say(LABELS.done.replace(' 🎉','')+'，辛苦了')}return}
   const s=plan[i],c=pc,left=Math.max(1,Math.ceil(s.s+s.d-e-1e-6));
   disp.style.background=`var(${COLORS[s.t]})`;
@@ -180,6 +190,9 @@ function show(){
   const info=s.i?`循環 ${s.i}/${c.cycles}`+(c.per>1&&s.j?` · 動作 ${s.j}/${c.per}`:''):'';
   $('info').textContent=info;
   setBar(100*(s.d-left)/s.d);
+  const nx=plan[i+1];
+  $('next').textContent=(nx?`接下來：${LABELS[nx.t]} ${nx.d} 秒`:'最後一段')+` · 總剩餘 ${fmtTime(total-e)}`;
+  document.title=`${left} ${LABELS[s.t]} · Exercise Timer`;
   if(lastIdx!==i){lastIdx=i;setMeta(LABELS[s.t]+(info?' · '+info:''));say(LABELS[s.t]+(info?'，'+info:'')+`，${s.d} 秒`)}
 }
 function loop(){

@@ -180,3 +180,47 @@ guard('contrast: every phase background has >= 4.5:1 against white text',async()
   for(const c of cols)assert.ok(1.05/(lum(c)+.05)>=4.5,`${c} too light for white text`);
   await ctx.close();
 });
+
+guard('next-up preview, total remaining time and tab title',async()=>{
+  const{ctx,page}=await open({warm:0,train:30,rest:10,per:2,cycles:1,between:0});
+  await page.click('#start');
+  assert.equal(await page.textContent('#next'),'接下來：休息 10 秒 · 總剩餘 1:10');
+  assert.match(await page.title(),/^30 訓練/);
+  await page.click('#skip');await page.click('#skip');
+  assert.match(await page.textContent('#next'),/^最後一段/);
+  await page.click('#reset');
+  assert.equal(await page.title(),'Exercise Timer');
+  assert.equal(await page.textContent('#next'),'');
+  await ctx.close();
+});
+
+guard('mute toggle persists, works while running and does not affect timing',async()=>{
+  const{ctx,page,errors}=await open({warm:0,train:5,rest:0,per:1,cycles:1,between:0});
+  await page.uncheck('#mix'); // media engine
+  await page.click('#start');
+  await page.check('#mute');
+  assert.equal(await page.evaluate(()=>audio.muted),true);
+  assert.equal(await page.isDisabled('#mute'),false);
+  await page.clock.runFor(2000);
+  assert.equal(await page.textContent('#time'),'3');
+  await page.reload();
+  assert.equal(await page.isChecked('#mute'),true);
+  assert.deepEqual(errors,[]);await ctx.close();
+});
+
+guard('mix mode: muting clears scheduled oscillators and unmuting reschedules them',async()=>{
+  const{ctx,page}=await open({warm:0,train:8,rest:0,per:1,cycles:1,between:0});
+  await page.evaluate(()=>{ // count oscillators created, to observe (re)scheduling without real audio
+    window.__osc=0;const AC=window.AudioContext||window.webkitAudioContext,o=AC.prototype.createOscillator;
+    AC.prototype.createOscillator=function(){window.__osc++;return o.call(this)};
+  });
+  await page.click('#start');
+  const first=await page.evaluate(()=>window.__osc);assert.ok(first>0);
+  await page.check('#mute');
+  await page.evaluate(()=>{window.__osc=0});
+  await page.clock.runFor(1500);
+  assert.equal(await page.evaluate(()=>window.__osc),0);
+  await page.uncheck('#mute');
+  assert.ok(await page.evaluate(()=>window.__osc)>0);
+  await ctx.close();
+});
