@@ -121,3 +121,62 @@ guard('settings persist across reloads',async()=>{
   assert.equal(await page.inputValue('#train'),'33');
   await ctx.close();
 });
+
+guard('a11y: roles, labels, live region and progressbar values',async()=>{
+  const{ctx,page}=await open({warm:0,train:10,rest:0,per:1,cycles:1,between:0});
+  assert.equal(await page.getAttribute('#time','role'),'timer');
+  assert.equal(await page.getAttribute('#bar','role'),'progressbar');
+  assert.equal(await page.getAttribute('#sr','aria-live'),'polite');
+  await page.click('#start');
+  assert.match(await page.textContent('#sr'),/訓練/);
+  await page.clock.runFor(5100);
+  assert.ok(Number(await page.getAttribute('#bar','aria-valuenow'))>=40);
+  await page.click('#start');
+  assert.equal(await page.textContent('#sr'),'已暫停');
+  assert.equal(await page.isVisible('#lockhint'),true);
+  await ctx.close();
+});
+
+guard('keyboard: Space starts/pauses, S skips, R only resets when not running',async()=>{
+  const{ctx,page}=await open({warm:0,train:5,rest:0,per:2,cycles:1,between:0});
+  await page.evaluate(()=>document.activeElement.blur()); // fill() leaves focus in the input
+  await page.keyboard.press('Space');
+  assert.equal(await page.textContent('#start'),'暫停');
+  await page.keyboard.press('s');
+  assert.match(await page.textContent('#info'),/動作 2\/2/);
+  await page.keyboard.press('r'); // running: ignored
+  assert.equal(await page.textContent('#phase'),'訓練');
+  await page.keyboard.press('Space'); // pause
+  assert.equal(await page.textContent('#start'),'繼續');
+  await page.keyboard.press('r');
+  assert.equal(await page.textContent('#phase'),'準備好了');
+  await ctx.close();
+});
+
+guard('keyboard: Space inside an input does not start the timer; Space on the Start button toggles exactly once',async()=>{
+  const{ctx,page}=await open();
+  await page.focus('#train');await page.keyboard.press('Space');
+  assert.equal(await page.textContent('#start'),'開始');
+  await page.focus('#start');await page.keyboard.press('Space');
+  assert.equal(await page.textContent('#start'),'暫停');
+  await ctx.close();
+});
+
+guard('mobile layout: no horizontal overflow at 320px and all buttons >= 44px tall',async()=>{
+  const ctx=await browser.newContext({viewport:{width:320,height:640}});
+  const page=await ctx.newPage();await page.goto(URL_);
+  const over=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);
+  assert.ok(over<=0,`overflow ${over}px`);
+  for(const id of['start','skip','reset']){
+    const b=await page.locator('#'+id).boundingBox();assert.ok(b.height>=44&&b.width>=44,id);
+  }
+  await ctx.close();
+});
+
+guard('contrast: every phase background has >= 4.5:1 against white text',async()=>{
+  const{ctx,page}=await open();
+  const cols=await page.evaluate(()=>['warm','train','rest','between','done'].map(k=>getComputedStyle(document.documentElement).getPropertyValue('--'+k).trim()));
+  const lum=h=>{const c=[1,3,5].map(i=>parseInt(h.slice(i,i+2),16)/255).map(v=>v<=.03928?v/12.92:((v+.055)/1.055)**2.4);return .2126*c[0]+.7152*c[1]+.0722*c[2]};
+  for(const c of cols)assert.ok(1.05/(lum(c)+.05)>=4.5,`${c} too light for white text`);
+  await ctx.close();
+});
